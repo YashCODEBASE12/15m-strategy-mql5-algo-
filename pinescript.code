@@ -1,0 +1,182 @@
+//@version=6
+strategy("EMA 30 Live Execution Engine", overlay = true, calc_on_every_tick = false, initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 10)
+
+// =========================
+// INPUTS
+// =========================
+grp_main = "Main Settings"
+emaLen = input.int(30, title = "EMA Length", group = grp_main)
+emaSrc = input.source(open, title = "EMA Source", group = grp_main)
+
+grp_filters = "Optional Filters (All OFF by default)"
+useAtr = input.bool(false, title = "ATR Filter", group = grp_filters)
+atrLen = input.int(14, title = "ATR Length", group = grp_filters)
+useSession = input.bool(false, title = "Session Filter", group = grp_filters)
+sessionTime = input.session("0800-1700", title = "Trading Session", group = grp_filters)
+useMinCandle = input.bool(false, title = "Minimum Candle Size", group = grp_filters)
+minCandlePips = input.float(5.0, title = "Min Candle Pips", group = grp_filters)
+longOnly = input.bool(false, title = "Long Only", group = grp_filters)
+shortOnly = input.bool(false, title = "Short Only", group = grp_filters)
+useBE = input.bool(false, title = "Break Even", group = grp_filters)
+useTrail = input.bool(false, title = "Trailing Stop", group = grp_filters)
+usePartial = input.bool(false, title = "Partial TP", group = grp_filters)
+
+// =========================
+// CORE INDICATORS
+// =========================
+ema30 = ta.ema(emaSrc, emaLen)
+plot(ema30, title = "EMA 30", color = color.blue, linewidth = 2)
+
+// =========================
+// FILTER CALCULATIONS
+// =========================
+inSession = useSession ? not na(time(timeframe.period, sessionTime)) : true
+atrVal = ta.atr(atrLen)
+candleSize = math.abs(close - open) / syminfo.mintick / 10
+passAtr = useAtr ? candleSize > (atrVal / syminfo.mintick / 10) : true
+passMinCandle = useMinCandle ? candleSize >= minCandlePips : true
+canLong = not shortOnly
+canShort = not longOnly
+trailLongStop = ta.lowest(low, 3)
+trailShortStop = ta.highest(high, 3)
+
+// =========================
+// ENTRY LOGIC
+// =========================
+isGreen = close > open
+isRed = close < open
+crossUp = ta.crossover(close, ema30)
+crossDn = ta.crossunder(close, ema30)
+
+buySignal = crossUp and isGreen and inSession and passAtr and passMinCandle and canLong
+sellSignal = crossDn and isRed and inSession and passAtr and passMinCandle and canShort
+
+// =========================
+// TRADE STATE VARIABLES
+// =========================
+var float ep = na
+var float sl = na
+var float tp1 = na
+var float tp2 = na
+var float tp3 = na
+var float current_sl = na
+var float risk = na
+
+if buySignal
+    ep := close
+    sl := open
+    risk := math.abs(ep - sl)
+    tp1 := ep + risk * 1.5
+    tp2 := ep + risk * 2.0
+    tp3 := ep + risk * 3.0
+    current_sl := sl
+
+if sellSignal
+    ep := close
+    sl := open
+    risk := math.abs(ep - sl)
+    tp1 := ep - risk * 1.5
+    tp2 := ep - risk * 2.0
+    tp3 := ep - risk * 3.0
+    current_sl := sl
+
+// =========================
+// EXECUTION & MANAGEMENT
+// =========================
+if buySignal
+    if strategy.position_size < 0
+        strategy.close("Short", comment = "Close Short")
+    strategy.entry("Long", strategy.long)
+
+if sellSignal
+    if strategy.position_size > 0
+        strategy.close("Long", comment = "Close Long")
+    strategy.entry("Short", strategy.short)
+
+if strategy.position_size > 0
+    if useBE and high >= tp1
+        current_sl := ep
+    if useTrail
+        current_sl := math.max(current_sl, trailLongStop)
+        
+    if usePartial
+        strategy.exit("TP1", "Long", qty_percent = 33, stop = current_sl, limit = tp1)
+        strategy.exit("TP2", "Long", qty_percent = 50, stop = current_sl, limit = tp2)
+        strategy.exit("TP3", "Long", stop = current_sl, limit = tp3)
+    else
+        strategy.exit("Exit", "Long", stop = current_sl, limit = tp3)
+
+if strategy.position_size < 0
+    if useBE and low <= tp1
+        current_sl := ep
+    if useTrail
+        current_sl := math.min(current_sl, trailShortStop)
+        
+    if usePartial
+        strategy.exit("TP1", "Short", qty_percent = 33, stop = current_sl, limit = tp1)
+        strategy.exit("TP2", "Short", qty_percent = 50, stop = current_sl, limit = tp2)
+        strategy.exit("TP3", "Short", stop = current_sl, limit = tp3)
+    else
+        strategy.exit("Exit", "Short", stop = current_sl, limit = tp3)
+
+// =========================
+// VISUALS: LABELS & LINES
+// =========================
+if buySignal
+    label.new(bar_index, low - ta.atr(14)*0.5, "BUY", color = color.green, textcolor = color.white, style = label.style_label_up, size = size.small)
+    
+if sellSignal
+    label.new(bar_index, high + ta.atr(14)*0.5, "SELL", color = color.red, textcolor = color.white, style = label.style_label_down, size = size.small)
+
+var line line_ep = na
+var line line_sl = na
+var line line_tp1 = na
+var line line_tp2 = na
+var line line_tp3 = na
+
+if buySignal or sellSignal
+    line.delete(line_ep)
+    line.delete(line_sl)
+    line.delete(line_tp1)
+    line.delete(line_tp2)
+    line.delete(line_tp3)
+    
+    line_ep := line.new(bar_index, ep, bar_index + 1, ep, color = color.blue, style = line.style_solid)
+    line_sl := line.new(bar_index, sl, bar_index + 1, sl, color = color.red, style = line.style_solid)
+    line_tp1 := line.new(bar_index, tp1, bar_index + 1, tp1, color = color.green, style = line.style_dashed)
+    line_tp2 := line.new(bar_index, tp2, bar_index + 1, tp2, color = color.green, style = line.style_dashed)
+    line_tp3 := line.new(bar_index, tp3, bar_index + 1, tp3, color = color.green, style = line.style_dashed)
+else if strategy.position_size != 0
+    line.set_x2(line_ep, bar_index)
+    line.set_x2(line_sl, bar_index)
+    line.set_x2(line_tp1, bar_index)
+    line.set_x2(line_tp2, bar_index)
+    line.set_x2(line_tp3, bar_index)
+else
+    line.delete(line_ep)
+    line.delete(line_sl)
+    line.delete(line_tp1)
+    line.delete(line_tp2)
+    line.delete(line_tp3)
+
+// =========================
+// DASHBOARD
+// =========================
+var table dash = table.new(position.top_right, 2, 5, bgcolor = color.new(color.black, 70), border_width = 1, border_color = color.gray)
+
+if barstate.islast
+    table.cell(dash, 0, 0, "EMA 30 Engine", text_color = color.white, text_halign = text.align_left)
+    table.cell(dash, 1, 0, "Metrics", text_color = color.white, text_halign = text.align_right)
+    
+    table.cell(dash, 0, 1, "Status:", text_color = color.white, text_halign = text.align_left)
+    table.cell(dash, 1, 1, strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT", text_color = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray, text_halign = text.align_right)
+    
+    table.cell(dash, 0, 2, "Net Profit:", text_color = color.white, text_halign = text.align_left)
+    table.cell(dash, 1, 2, str.tostring(strategy.netprofit, "#.##"), text_color = strategy.netprofit > 0 ? color.green : color.red, text_halign = text.align_right)
+    
+    table.cell(dash, 0, 3, "Win Rate:", text_color = color.white, text_halign = text.align_left)
+    winRate = strategy.closedtrades > 0 ? (strategy.wintrades / strategy.closedtrades) * 100 : 0
+    table.cell(dash, 1, 3, str.tostring(winRate, "#.##") + "%", text_color = color.white, text_halign = text.align_right)
+    
+    table.cell(dash, 0, 4, "Total Trades:", text_color = color.white, text_halign = text.align_left)
+    table.cell(dash, 1, 4, str.tostring(strategy.closedtrades), text_color = color.white, text_halign = text.align_right)
